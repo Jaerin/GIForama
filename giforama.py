@@ -11,18 +11,26 @@ class MonitorApp:
         self.root.title('Monitor App')
         self.root.attributes('-topmost', True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.minsize(420, 135)
         self.root.resizable(False, False)
         self.last_mouse_position = (None, None)
 
-
-
+        # Position the window near the middle of the screen when starting
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width / 2) - (self.root.winfo_width() / 2)
+        y = (screen_height / 2) - (self.root.winfo_height() / 2)
+        self.root.geometry(f"+{int(x)}+{int(y)}")
 
         self.selection = None
         self.selection_in_progress = False  # Add this variable
+        self.last_selection_coordinates = None  # Add this attribute to store the last selection coordinates
+
         self.update_image_flag = False
         self.stop_thread = threading.Event()
         self.recording = False
         self.mouse_held_down = False  # Add this line
+
 
         # Create a frame for the image
         self.image_frame = ttk.Frame(root)
@@ -89,6 +97,8 @@ class MonitorApp:
         self.clear = None  # Store the clear version of the screen
         self.mask = None  # Initialize mask as None
         self.mask_draw = None  # Initialize ImageDraw object as None
+        self.canvas_update_in_progress = False  # Add this flag to handle overlapping canvas updates
+        self.canvas = tk.Canvas(self.root)
 
     def toggle_record_stop(self):
         if not self.recording:
@@ -138,8 +148,20 @@ class MonitorApp:
 
 
     def update_dimmed_image(self, end_x, end_y):
-        if self.canvas_img_pil is None:
+        if self.canvas_img_pil is None or self.canvas_update_in_progress:
             return
+        # Guard against None before accessing attributes
+        if self.dimmed:
+            print(f"Image details: Size: {self.dimmed.size}, Mode: {self.dimmed.mode}")
+        else:
+            print("Warning: self.dimmed is None!")
+
+        # Check if the selection coordinates have changed
+        current_selection_coordinates = (self.start_x, self.start_y, end_x, end_y)
+        if self.last_selection_coordinates == current_selection_coordinates:
+            return  # Skip updating the canvas if the selection coordinates haven't changed
+
+        self.canvas_update_in_progress = True  # Set the flag
 
         # Ensure the coordinates are in the right order
         left = min(self.start_x, end_x)
@@ -160,6 +182,18 @@ class MonitorApp:
         if not self.stop_thread.is_set():
             self.canvas.itemconfig(self.canvas_image, image=dimmed_photo_image)
             self.photo_image = dimmed_photo_image
+        print(f"Updating canvas with dimmed image. Selection: ({self.start_x}, {self.start_y}) to ({end_x}, {end_y})")
+
+        self.canvas_update_in_progress = False  # Reset the flag
+        self.last_selection_coordinates = current_selection_coordinates  # Update the last selection coordinates
+        # Debug: Print details about the image being displayed
+        print(f"Updating canvas with dimmed image. Selection: ({self.start_x}, {self.start_y}) to ({end_x}, {end_y})")
+        print(f"Image details: Size: {self.dimmed.size}, Mode: {self.dimmed.mode}")
+
+        # Debug: Print details about all objects on the canvas
+        for obj in self.canvas.find_all():
+            print(f"Canvas object: {obj}, Type: {self.canvas.type(obj)}, Coords: {self.canvas.coords(obj)}")
+        
 
 
 
@@ -281,22 +315,31 @@ class MonitorApp:
         self.continuous_update()  # Start the continuous update
 
     def on_drag(self, event):
-        self.update_dimmed_image(event.x, event.y)
+        if not self.canvas_update_in_progress:  # Check the flag
+            self.update_dimmed_image(event.x, event.y)
+
+        # Debug: Print details about the drag event
+        print(f"Drag event at ({event.x}, {event.y}). Canvas objects: {self.canvas.find_all()}")
+
 
     def continuous_update(self):
-        current_mouse_position = (self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
-                                  self.canvas.winfo_pointery() - self.canvas.winfo_rooty())
-        
-        # Check if the mouse position has changed
-        if self.mouse_held_down and current_mouse_position != self.last_mouse_position:
-            self.update_dimmed_image(*current_mouse_position)
-            self.last_mouse_position = current_mouse_position  # Update the last known position
+        if not self.canvas_update_in_progress:  # Check the flag
+            current_mouse_position = (self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
+                                      self.canvas.winfo_pointery() - self.canvas.winfo_rooty())
+            
+            # Check if the mouse position has changed
+            if self.mouse_held_down and current_mouse_position != self.last_mouse_position:
+                self.update_dimmed_image(*current_mouse_position)
+                self.last_mouse_position = current_mouse_position  # Update the last known position
 
-        self.canvas.after(1, self.continuous_update)  # Reduced delay to 20ms
+        self.canvas.after(1, self.continuous_update)
+        print(f"Continuous update. Mouse position: ({self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()}, {self.canvas.winfo_pointery() - self.canvas.winfo_rooty()})")
 
     def on_release(self, event):
         self.selection = (self.start_x, self.start_y, event.x, event.y)
         self.mouse_held_down = False  # Set the flag to False
+        print(f"Release event at ({event.x}, {event.y}). Canvas objects: {self.canvas.find_all()}")
+
         
         if hasattr(self, 'canvas_img_pil'):
             self.canvas_img_pil = None
@@ -335,6 +378,26 @@ class MonitorApp:
         self.dimmed = None
         self.mask = None
         self.mask_draw = None
+        
+        # Reposition the window to an area that does not overlap with the selection area
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = self.root.winfo_width()
+        window_height = self.root.winfo_height()
+
+        # Calculate new x and y coordinates
+        if event.x + window_width < screen_width:
+            x = event.x
+        else:
+            x = screen_width - window_width - 10  # 10 is a buffer
+
+        if event.y + window_height < screen_height:
+            y = event.y
+        else:
+            y = screen_height - window_height - 10  # 10 is a buffer
+
+        self.root.geometry(f"+{int(x)}+{int(y)}")
+
 
 
     def estimate_gif_size(self):
