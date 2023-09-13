@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
-from PIL import Image, ImageTk, ImageGrab, ImageEnhance
+from PIL import Image, ImageTk, ImageGrab, ImageEnhance, ImageChops, ImageDraw
 import threading
 import time
 from io import BytesIO
@@ -12,12 +12,17 @@ class MonitorApp:
         self.root.attributes('-topmost', True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.resizable(False, False)
+        self.last_mouse_position = (None, None)
+
+
+
 
         self.selection = None
         self.selection_in_progress = False  # Add this variable
         self.update_image_flag = False
         self.stop_thread = threading.Event()
         self.recording = False
+        self.mouse_held_down = False  # Add this line
 
         # Create a frame for the image
         self.image_frame = ttk.Frame(root)
@@ -80,6 +85,10 @@ class MonitorApp:
         self.rect = None
         self.canvas_img_pil = None
         self.canvas_img = None
+        self.dimmed = None  # Store the dimmed version of the screen
+        self.clear = None  # Store the clear version of the screen
+        self.mask = None  # Initialize mask as None
+        self.mask_draw = None  # Initialize ImageDraw object as None
 
     def toggle_record_stop(self):
         if not self.recording:
@@ -138,18 +147,21 @@ class MonitorApp:
         right = max(self.start_x, end_x)
         lower = max(self.start_y, end_y)
 
+        # Create the dimmed image
         dimmed = ImageEnhance.Brightness(self.canvas_img_pil).enhance(0.3)
-        clear = ImageEnhance.Brightness(self.canvas_img_pil).enhance(1)
+        dimmed.paste(self.canvas_img_pil.crop((left, upper, right, lower)), (left, upper))
 
-        try:
-            dimmed.paste(clear.crop((left, upper, right, lower)), (left, upper))
-            dimmed_photo_image = ImageTk.PhotoImage(dimmed)
+        # Draw the red selection box directly onto the dimmed image
+        draw = ImageDraw.Draw(dimmed)
+        draw.rectangle([left, upper, right, lower], outline='red', width=2)
 
-            if not self.stop_thread.is_set():
-                self.canvas.itemconfig(self.canvas_image, image=dimmed_photo_image)
-                self.photo_image = dimmed_photo_image
-        except Exception as e:
-            print(f"Error updating dimmed image: {e}")
+        dimmed_photo_image = ImageTk.PhotoImage(dimmed)
+
+        if not self.stop_thread.is_set():
+            self.canvas.itemconfig(self.canvas_image, image=dimmed_photo_image)
+            self.photo_image = dimmed_photo_image
+
+
 
     def initiate_select_area(self):
         # Clean up and stop the existing update thread if it exists
@@ -223,9 +235,11 @@ class MonitorApp:
                 self.photo_image = ImageTk.PhotoImage(img)
                 self.image_label.config(image=self.photo_image)
                 self.root.update_idletasks()
+                time.sleep(0.1)  # Introduce a delay to throttle the updates
             except Exception as e:
                 print(f"Error capturing screen: {e}")
                 self.update_image_flag = False
+
 
     def initiate_select_area(self):
         if not self.selection_in_progress:  # Check if a selection is not already in progress
@@ -263,16 +277,27 @@ class MonitorApp:
 
     def on_press(self, event):
         self.start_x, self.start_y = event.x, event.y
+        self.mouse_held_down = True  # Set the flag to True
+        self.continuous_update()  # Start the continuous update
 
     def on_drag(self, event):
-        if getattr(self, 'rect', None):
-            self.canvas.delete(self.rect)
-        self.rect = self.canvas.create_rectangle(self.start_x, self.start_y, event.x, event.y, outline='red', width=2)
         self.update_dimmed_image(event.x, event.y)
+
+    def continuous_update(self):
+        current_mouse_position = (self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
+                                  self.canvas.winfo_pointery() - self.canvas.winfo_rooty())
+        
+        # Check if the mouse position has changed
+        if self.mouse_held_down and current_mouse_position != self.last_mouse_position:
+            self.update_dimmed_image(*current_mouse_position)
+            self.last_mouse_position = current_mouse_position  # Update the last known position
+
+        self.canvas.after(1, self.continuous_update)  # Reduced delay to 20ms
 
     def on_release(self, event):
         self.selection = (self.start_x, self.start_y, event.x, event.y)
-
+        self.mouse_held_down = False  # Set the flag to False
+        
         if hasattr(self, 'canvas_img_pil'):
             self.canvas_img_pil = None
         if hasattr(self, 'canvas_img'):
@@ -307,6 +332,9 @@ class MonitorApp:
             self.record_stop_button.config(text="Record", state=tk.NORMAL)
 
         self.selection_in_progress = False  # Reset selection in progress
+        self.dimmed = None
+        self.mask = None
+        self.mask_draw = None
 
 
     def estimate_gif_size(self):
