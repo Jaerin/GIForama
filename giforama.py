@@ -25,6 +25,7 @@ class MonitorApp:
         self.recording = False
         self.mouse_held_down = False
         self.recording_start_time = None
+        self.images_for_gif = []
         self.frames_recorded = 0
         self.start_x = self.start_y = None
         self.rect = None
@@ -78,42 +79,42 @@ class MonitorApp:
 
     def toggle_record_stop(self):
         if not self.recording:
-            # Start recording
             self.start_recording()
         else:
-            # Stop recording
             self.stop_recording()
 
     def start_recording(self):
         self.recording_start_time = time.time()
         self.record_stop_button.config(text="Stop")
-        self.save_button.config(state=tk.DISABLED)  # Disable save button during recording
+        self.save_button.config(state=tk.DISABLED)
         self.recording = True
-        self.update_estimated_size_label()  # Update the estimated size label
+        self.update_estimated_size_label()
 
     def stop_recording(self):
         self.record_stop_button.config(text="Record")
-        self.save_button.config(state=tk.NORMAL)  # Enable save button after stopping recording
+        self.save_button.config(state=tk.NORMAL)
         self.recording = False
         self.recording_start_time = None
-        self.update_estimated_size_label()  # Update the estimated size label
+        self.update_estimated_size_label()
 
     def save_gif(self):
-        filename = self.filename_entry.get()
+        filename = self.filename_entry.get().strip()
         if not filename:
             filename = "output.gif"
+        elif not filename.lower().endswith('.gif'):
+            filename += ".gif"
         try:
             self.images_for_gif[0].save(filename,
                                         save_all=True,
                                         append_images=self.images_for_gif[1:],
-                                        duration=100,  # 100 ms per frame
+                                        duration=100,
                                         loop=0)
             self.images_for_gif = []
             self.frames_recorded = 0
             self.frame_count_label.config(text="Frames Recorded: 0")
-            self.recording_start_time = None  # Reset the recording time
-            self.timer_label.config(text="Recording Time: 00:00")  # Reset the timer display
-            self.update_estimated_size_label()  # Update the estimated size label
+            self.recording_start_time = None
+            self.timer_label.config(text="Recording Time: 00:00")
+            self.update_estimated_size_label()
         except Exception as e:
             print(f"Error saving GIF: {e}")
  
@@ -126,17 +127,25 @@ class MonitorApp:
         if self.canvas_img_pil is None:
             return
 
-        # Ensure the coordinates are in the right order
         left = min(self.start_x, end_x)
         upper = min(self.start_y, end_y)
         right = max(self.start_x, end_x)
         lower = max(self.start_y, end_y)
 
-        # Create the dimmed image
-        dimmed = ImageEnhance.Brightness(self.canvas_img_pil).enhance(0.3)
-        dimmed.paste(self.canvas_img_pil.crop((left, upper, right, lower)), (left, upper))
+        # Create a copy of the original image
+        dimmed = self.canvas_img_pil.copy()
 
-        # Draw the red selection box directly onto the dimmed image
+        # Dim the regions outside the selected area
+        if left > 0:
+            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((0, 0, left, dimmed.height))).enhance(0.3), (0, 0))
+        if right < dimmed.width:
+            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((right, 0, dimmed.width, dimmed.height))).enhance(0.3), (right, 0))
+        if upper > 0:
+            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((left, 0, right, upper))).enhance(0.3), (left, 0))
+        if lower < dimmed.height:
+            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((left, lower, right, dimmed.height))).enhance(0.3), (left, lower))
+
+        # Draw the red rectangle around the selected area
         draw = ImageDraw.Draw(dimmed)
         draw.rectangle([left, upper, right, lower], outline='red', width=2)
 
@@ -147,7 +156,6 @@ class MonitorApp:
             self.photo_image = dimmed_photo_image
 
     def initiate_select_area(self):
-        # Clean up and stop the existing update thread if it exists
         if hasattr(self, 'update_thread') and self.update_thread.is_alive():
             self.update_image_flag = False
         
@@ -156,7 +164,6 @@ class MonitorApp:
         self.root.after(200)
 
         try:
-            # Always take a fresh screenshot
             screen = ImageGrab.grab()
             if hasattr(self, 'select_win'):
                 try:
@@ -170,8 +177,6 @@ class MonitorApp:
             self.select_win.attributes('-fullscreen', True, '-topmost', True)
             canvas = tk.Canvas(self.select_win, cursor='cross', highlightthickness=0, bg='black', width=screen.width, height=screen.height)
             canvas.pack(fill=tk.BOTH, expand=tk.YES)
-            self.canvas_img_pil = screen
-            self.canvas_img = ImageTk.PhotoImage(screen)
             self.canvas_image = canvas.create_image(0, 0, anchor=tk.NW, image=self.canvas_img)
             canvas.bind('<ButtonPress-1>', self.on_press)
             canvas.bind('<B1-Motion>', self.on_drag)
@@ -183,7 +188,6 @@ class MonitorApp:
             self.root.deiconify()
 
     def create_blank_image(self):
-        # Create a placeholder blank image
         return ImageTk.PhotoImage(Image.new("RGB", (1, 1), "white"))
 
     def update_timer(self):
@@ -192,38 +196,35 @@ class MonitorApp:
             elapsed_time = current_time - self.recording_start_time
             formatted_time = time.strftime("%M:%S", time.gmtime(elapsed_time))
             self.timer_label.config(text=f"Recording Time: {formatted_time}")
-        # Schedule the timer to update every 1000 ms (1 second)
         self.root.after(1000, self.update_timer)
         
     def update_selected_area(self):
-        while self.update_image_flag:
+        while self.update_image_flag and not self.stop_thread.is_set():
             if not self.selection:
                 self.photo_image = self.create_blank_image()
                 self.image_label.config(image=self.photo_image)
                 self.root.update_idletasks()
-                time.sleep(0.1)
                 continue
 
             x1, y1, x2, y2 = self.selection
             try:
                 img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
                 if self.recording:
-                    self.images_for_gif.append(img)  # Storing the image for GIF generation
+                    self.images_for_gif.append(img)
                     self.frames_recorded += 1
                     self.frame_count_label.config(text=f"Frames Recorded: {self.frames_recorded}")
                 self.previous_image = self.photo_image  
                 self.photo_image = ImageTk.PhotoImage(img)
                 self.image_label.config(image=self.photo_image)
                 self.root.update_idletasks()
-                time.sleep(0.1)  # Introduce a delay to throttle the updates
             except Exception as e:
                 print(f"Error capturing screen: {e}")
                 self.update_image_flag = False
 
     def on_press(self, event):
         self.start_x, self.start_y = event.x, event.y
-        self.mouse_held_down = True  # Set the flag to True
-        self.continuous_update()  # Start the continuous update
+        self.mouse_held_down = True
+        self.continuous_update()
 
     def on_drag(self, event):
         self.update_dimmed_image(event.x, event.y)
@@ -232,22 +233,33 @@ class MonitorApp:
         current_mouse_position = (self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
                                   self.canvas.winfo_pointery() - self.canvas.winfo_rooty())
         
-        # Check if the mouse position has changed
         if self.mouse_held_down and current_mouse_position != self.last_mouse_position:
             self.update_dimmed_image(*current_mouse_position)
-            self.last_mouse_position = current_mouse_position  # Update the last known position
+            self.last_mouse_position = current_mouse_position
 
-        self.canvas.after(1, self.continuous_update)  # Reduced delay to 20ms
+        self.canvas.after(1, self.continuous_update)
 
     def on_release(self, event):
-        # Ensure the coordinates are in the right order
         left = min(self.start_x, event.x)
         upper = min(self.start_y, event.y)
         right = max(self.start_x, event.x)
         lower = max(self.start_y, event.y)
 
+
+        MIN_SELECTION_SIZE = 10  
+        if abs(right - left) < MIN_SELECTION_SIZE or abs(lower - upper) < MIN_SELECTION_SIZE:
+            print("Selection too small. Ignored.")
+            if hasattr(self, 'canvas_img_pil'):
+                self.canvas_img_pil = None
+            if hasattr(self, 'canvas_img'):
+                self.canvas_img = None
+            if hasattr(self, 'select_win'):
+                self.select_win.destroy()
+            self.root.deiconify()
+            return
+
         self.selection = (left, upper, right, lower)
-        self.mouse_held_down = False  # Set the flag to False
+        self.mouse_held_down = False
         
         if hasattr(self, 'canvas_img_pil'):
             self.canvas_img_pil = None
@@ -257,18 +269,15 @@ class MonitorApp:
             self.select_win.destroy()
 
         self.root.deiconify()
+        self.root.focus_force()
 
-        min_border = 10  # Minimum border size
-
-        # Calculate the minimum height based on the button frame's location
-        button_frame_height = self.button_frame.winfo_height()
-        min_height = 2 * min_border + button_frame_height
         
-        # Calculate the height while ensuring it's not below the minimum
+        button_frame_height = self.button_frame.winfo_height()
+        min_height = 20 + button_frame_height
+        
         height = max(abs(lower - upper), min_height)
         
-        # Adjust the window size to accommodate the buttons and maintain the minimum size
-        self.root.geometry(f"{right - left + 20}x{height + 135}")  # Increased window height
+        self.root.geometry(f"{right - left + 20}x{height + 135}")
 
         self.update_image_flag = True
 
@@ -278,26 +287,20 @@ class MonitorApp:
             self.update_thread.start()
             self.record_stop_button.config(text="Record", state=tk.NORMAL)
         else:
-            # Reuse the existing update thread
             self.record_stop_button.config(text="Record", state=tk.NORMAL)
 
-        self.selection_in_progress = False  # Reset selection in progress
+        self.selection_in_progress = False
 
     def estimate_gif_size(self):
-        if not self.images_for_gif:
+        if not hasattr(self, 'images_for_gif') or not self.images_for_gif:
             return "N/A"
 
         try:
-            # Create a BytesIO object to save the GIF in memory
             buffer = BytesIO()
-            
-            # Save the GIF to the buffer (you can specify other options like duration, loop, etc.)
+
             self.images_for_gif[0].save(buffer, format="GIF", save_all=True, append_images=self.images_for_gif[1:])
-            
-            # Get the size of the buffer in bytes
             size_bytes = buffer.tell()
             
-            # Convert bytes to human-readable format
             if size_bytes < 1024:
                 return f"{size_bytes} bytes"
             elif size_bytes < 1024 * 1024:
@@ -310,9 +313,9 @@ class MonitorApp:
 
     def on_closing(self):
         self.update_image_flag = False
+        self.stop_thread.set()
 
         if hasattr(self, 'update_thread') and self.update_thread.is_alive():
-            # Wait a bit and check again
             self.root.after(100, self.on_closing)
         else:
             self.root.destroy()
@@ -320,5 +323,5 @@ class MonitorApp:
 if __name__ == '__main__':
     root = tk.Tk()
     app = MonitorApp(root)
-    app.update_timer()  # Start the timer update
+    app.update_timer()
     root.mainloop()
