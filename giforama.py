@@ -4,6 +4,7 @@ from PIL import Image, ImageTk, ImageGrab, ImageEnhance, ImageDraw
 from io import BytesIO
 import threading
 import time
+import queue
 
 class MonitorApp:
     def __init__(self, root):
@@ -28,9 +29,9 @@ class MonitorApp:
         self.images_for_gif = []
         self.frames_recorded = 0
         self.start_x = self.start_y = None
-        self.rect = None
         self.canvas_img_pil = None
         self.canvas_img = None
+        self.update_queue = queue.Queue()
 
     def setup_ui_elements(self):
         self.setup_image_frame()
@@ -165,12 +166,7 @@ class MonitorApp:
 
         try:
             screen = ImageGrab.grab()
-            if hasattr(self, 'select_win'):
-                try:
-                    self.select_win.destroy()
-                except tk.TclError:
-                    pass
-
+            self.reset_selection_window()
             self.select_win = tk.Toplevel()
             self.canvas_img_pil = screen
             self.canvas_img = ImageTk.PhotoImage(screen)
@@ -201,9 +197,7 @@ class MonitorApp:
     def update_selected_area(self):
         while self.update_image_flag and not self.stop_thread.is_set():
             if not self.selection:
-                self.photo_image = self.create_blank_image()
-                self.image_label.config(image=self.photo_image)
-                self.root.update_idletasks()
+                self.update_queue.put(("update_image", self.create_blank_image()))  # <-- Use the queue to send updates
                 continue
 
             x1, y1, x2, y2 = self.selection
@@ -212,14 +206,21 @@ class MonitorApp:
                 if self.recording:
                     self.images_for_gif.append(img)
                     self.frames_recorded += 1
-                    self.frame_count_label.config(text=f"Frames Recorded: {self.frames_recorded}")
-                self.previous_image = self.photo_image  
-                self.photo_image = ImageTk.PhotoImage(img)
-                self.image_label.config(image=self.photo_image)
-                self.root.update_idletasks()
+                    self.update_queue.put(("update_frame_count", self.frames_recorded))  # <-- Use the queue to send updates
+                self.update_queue.put(("update_image", ImageTk.PhotoImage(img)))  # <-- Use the queue to send updates
             except Exception as e:
                 print(f"Error capturing screen: {e}")
                 self.update_image_flag = False
+
+    def poll_queue(self):
+        while not self.update_queue.empty():
+            action, data = self.update_queue.get()
+            if action == "update_image":
+                self.photo_image = data
+                self.image_label.config(image=self.photo_image)
+            elif action == "update_frame_count":
+                self.frame_count_label.config(text=f"Frames Recorded: {data}")
+        self.root.after(10, self.poll_queue)
 
     def on_press(self, event):
         self.start_x, self.start_y = event.x, event.y
@@ -239,6 +240,17 @@ class MonitorApp:
 
         self.canvas.after(1, self.continuous_update)
 
+    def reset_selection_window(self):
+        if hasattr(self, 'canvas_img_pil'):
+            self.canvas_img_pil = None
+        if hasattr(self, 'canvas_img'):
+            self.canvas_img = None
+        if hasattr(self, 'select_win'):
+            try:
+                self.select_win.destroy()
+            except tk.TclError:
+                pass
+
     def on_release(self, event):
         left = min(self.start_x, event.x)
         upper = min(self.start_y, event.y)
@@ -249,12 +261,7 @@ class MonitorApp:
         MIN_SELECTION_SIZE = 10  
         if abs(right - left) < MIN_SELECTION_SIZE or abs(lower - upper) < MIN_SELECTION_SIZE:
             print("Selection too small. Ignored.")
-            if hasattr(self, 'canvas_img_pil'):
-                self.canvas_img_pil = None
-            if hasattr(self, 'canvas_img'):
-                self.canvas_img = None
-            if hasattr(self, 'select_win'):
-                self.select_win.destroy()
+            self.reset_selection_window()
             self.root.deiconify()
             return
 
@@ -324,4 +331,5 @@ if __name__ == '__main__':
     root = tk.Tk()
     app = MonitorApp(root)
     app.update_timer()
+    app.poll_queue()
     root.mainloop()
