@@ -1,10 +1,16 @@
 import tkinter as tk
 from tkinter import ttk
-from PIL import Image, ImageTk, ImageGrab, ImageEnhance, ImageDraw
+from PIL import Image, ImageTk, ImageGrab
 from io import BytesIO
 import threading
 import time
 import queue
+import win32gui
+import win32ui
+import win32con
+import cv2
+import numpy as np
+
 
 class MonitorApp:
     def __init__(self, root):
@@ -56,6 +62,8 @@ class MonitorApp:
         self.frame_count_label.pack(side=tk.LEFT, padx=5)
         self.estimated_size_label = ttk.Label(self.recording_info_frame, text="Estimated GIF Size: N/A", anchor=tk.W)
         self.estimated_size_label.pack(side=tk.LEFT, padx=5)
+        self.fps_label = ttk.Label(self.recording_info_frame, text="FPS: N/A", anchor=tk.W)
+        self.fps_label.pack(side=tk.LEFT, padx=5)
 
     def setup_filename_frame(self):
         self.filename_frame = ttk.Frame(self.root)
@@ -65,6 +73,12 @@ class MonitorApp:
         self.filename_entry = ttk.Entry(self.filename_frame)
         self.filename_entry.pack(side=tk.LEFT)
         self.filename_entry.insert(0, "output.gif")
+
+        self.framerate_label = ttk.Label(self.filename_frame, text="Max FPS:")
+        self.framerate_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.framerate_entry = ttk.Entry(self.filename_frame, width=5)
+        self.framerate_entry.pack(side=tk.LEFT)
+        self.framerate_entry.insert(0, "30")
 
     def setup_button_frame(self):
         self.button_frame = ttk.Frame(self.root)
@@ -77,6 +91,7 @@ class MonitorApp:
         self.save_button.pack(side=tk.LEFT, padx=5)
         self.quit_button = ttk.Button(self.button_frame, text="Quit", command=self.on_closing)
         self.quit_button.pack(side=tk.RIGHT, padx=5)
+
 
     def toggle_record_stop(self):
         if not self.recording:
@@ -119,10 +134,19 @@ class MonitorApp:
         except Exception as e:
             print(f"Error saving GIF: {e}")
  
+    def get_desired_fps(self):
+        fps_str = self.framerate_entry.get().strip()
+        if not fps_str:  # Check if the string is empty
+            return 30.0
+        try:
+            desired_fps = float(fps_str)
+            return desired_fps
+        except ValueError:
+            return 30.0
+
     def update_estimated_size_label(self):
         estimated_size = self.estimate_gif_size()
         self.estimated_size_label.config(text=f"Estimated GIF Size: {estimated_size}")
-
 
     def update_dimmed_image(self, end_x, end_y):
         if self.canvas_img_pil is None:
@@ -133,24 +157,14 @@ class MonitorApp:
         right = max(self.start_x, end_x)
         lower = max(self.start_y, end_y)
 
-        # Create a copy of the original image
-        dimmed = self.canvas_img_pil.copy()
+        img_cv = cv2.cvtColor(np.array(self.canvas_img_pil), cv2.COLOR_RGB2BGR)
+        dimmed = cv2.convertScaleAbs(img_cv, alpha=0.5, beta=0) 
+        dimmed[upper:lower, left:right] = img_cv[upper:lower, left:right]
+        cv2.rectangle(dimmed, (left, upper), (right, lower), (0, 0, 255), 2)
 
-        # Dim the regions outside the selected area
-        if left > 0:
-            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((0, 0, left, dimmed.height))).enhance(0.3), (0, 0))
-        if right < dimmed.width:
-            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((right, 0, dimmed.width, dimmed.height))).enhance(0.3), (right, 0))
-        if upper > 0:
-            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((left, 0, right, upper))).enhance(0.3), (left, 0))
-        if lower < dimmed.height:
-            dimmed.paste(ImageEnhance.Brightness(dimmed.crop((left, lower, right, dimmed.height))).enhance(0.3), (left, lower))
+        dimmed_pil = Image.fromarray(cv2.cvtColor(dimmed, cv2.COLOR_BGR2RGB))
 
-        # Draw the red rectangle around the selected area
-        draw = ImageDraw.Draw(dimmed)
-        draw.rectangle([left, upper, right, lower], outline='red', width=2)
-
-        dimmed_photo_image = ImageTk.PhotoImage(dimmed)
+        dimmed_photo_image = ImageTk.PhotoImage(image=dimmed_pil)
 
         if not self.stop_thread.is_set():
             self.canvas.itemconfig(self.canvas_image, image=dimmed_photo_image)
@@ -195,24 +209,73 @@ class MonitorApp:
         self.root.after(1000, self.update_timer)
         
     def update_selected_area(self):
+        desired_fps = self.get_desired_fps()
+
         while self.update_image_flag and not self.stop_thread.is_set():
             if not self.selection:
-                self.update_queue.put(("update_image", self.create_blank_image()))  # <-- Use the queue to send updates
+                self.update_queue.put(("update_image", self.create_blank_image()))
                 continue
 
+            start_time = time.time()
+
             x1, y1, x2, y2 = self.selection
+            width = x2 - x1
+            height = y2 - y1
+
             try:
-                img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+                hwnd = win32gui.GetDesktopWindow()
+                hwindc = win32gui.GetWindowDC(hwnd)
+                srcdc = win32ui.CreateDCFromHandle(hwindc)
+                memdc = srcdc.CreateCompatibleDC()
+                bmp = win32ui.CreateBitmap()
+                bmp.CreateCompatibleBitmap(srcdc, width, height)
+                memdc.SelectObject(bmp)
+                memdc.BitBlt((0, 0), (width, height), srcdc, (x1, y1), win32con.SRCCOPY)
+
+                bmpinfo = bmp.GetInfo()
+                bmpstr = bmp.GetBitmapBits(True)
+                img = Image.frombuffer(
+                    'RGB',
+                    (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                    bmpstr, 'raw', 'BGRX', 0, 1
+                )
+
+                srcdc.DeleteDC()
+                memdc.DeleteDC()
+                win32gui.ReleaseDC(hwnd, hwindc)
+                win32gui.DeleteObject(bmp.GetHandle())
+
                 if self.recording:
                     self.images_for_gif.append(img)
                     self.frames_recorded += 1
-                    self.update_queue.put(("update_frame_count", self.frames_recorded))  # <-- Use the queue to send updates
-                self.update_queue.put(("update_image", ImageTk.PhotoImage(img)))  # <-- Use the queue to send updates
+                    self.update_queue.put(("update_frame_count", self.frames_recorded))
+                self.update_queue.put(("update_image", ImageTk.PhotoImage(img)))
             except Exception as e:
                 print(f"Error capturing screen: {e}")
                 self.update_image_flag = False
 
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+
+            if elapsed_time > 0:
+                fps = 1 / elapsed_time
+                self.update_queue.put(("update_fps", fps))
+
+            desired_fps = 30.0
+            try:
+                if self.framerate_entry.get().strip():
+                    desired_fps = float(self.framerate_entry.get())
+            except ValueError:
+                pass
+
+            desired_delay = 1.0 / desired_fps
+            actual_delay = desired_delay - elapsed_time
+            if actual_delay > 0:
+                time.sleep(actual_delay)
+
     def poll_queue(self):
+        desired_fps = self.get_desired_fps()
+
         while not self.update_queue.empty():
             action, data = self.update_queue.get()
             if action == "update_image":
@@ -220,7 +283,11 @@ class MonitorApp:
                 self.image_label.config(image=self.photo_image)
             elif action == "update_frame_count":
                 self.frame_count_label.config(text=f"Frames Recorded: {data}")
-        self.root.after(10, self.poll_queue)
+            elif action == "update_fps":
+                actual_fps = min(data, desired_fps)
+                self.fps_label.config(text=f"FPS: {actual_fps:.2f}")
+
+        self.root.after(1, self.poll_queue)
 
     def on_press(self, event):
         self.start_x, self.start_y = event.x, event.y
@@ -238,7 +305,7 @@ class MonitorApp:
             self.update_dimmed_image(*current_mouse_position)
             self.last_mouse_position = current_mouse_position
 
-        self.canvas.after(1, self.continuous_update)
+        self.canvas.after(20, self.continuous_update)
 
     def reset_selection_window(self):
         if hasattr(self, 'canvas_img_pil'):
@@ -256,7 +323,6 @@ class MonitorApp:
         upper = min(self.start_y, event.y)
         right = max(self.start_x, event.x)
         lower = max(self.start_y, event.y)
-
 
         MIN_SELECTION_SIZE = 10  
         if abs(right - left) < MIN_SELECTION_SIZE or abs(lower - upper) < MIN_SELECTION_SIZE:
@@ -277,15 +343,11 @@ class MonitorApp:
 
         self.root.deiconify()
         self.root.focus_force()
-
-        
+     
         button_frame_height = self.button_frame.winfo_height()
-        min_height = 20 + button_frame_height
-        
-        height = max(abs(lower - upper), min_height)
-        
+        min_height = 20 + button_frame_height 
+        height = max(abs(lower - upper), min_height)    
         self.root.geometry(f"{right - left + 20}x{height + 135}")
-
         self.update_image_flag = True
 
         if not hasattr(self, 'update_thread') or not self.update_thread.is_alive():
@@ -304,7 +366,6 @@ class MonitorApp:
 
         try:
             buffer = BytesIO()
-
             self.images_for_gif[0].save(buffer, format="GIF", save_all=True, append_images=self.images_for_gif[1:])
             size_bytes = buffer.tell()
             
